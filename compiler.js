@@ -156,9 +156,9 @@ const tokenizer = (input) => {
           continue;
       }
 
-      // Semicolons
-      if (char === ';') {
-          tokens.push({ type: "semicolon", value: char });
+      // Commas and Semicolons
+      if (char === ',' || char === ';') {
+          tokens.push({ type: "punctuation", value: char });
           cursor++;
           continue;
       }
@@ -285,6 +285,14 @@ const parser = (tokens) => {
           }
       }
 
+      if (token.type === "bracket" && token.value === "[") {
+          return parseArrayLiteral();
+      }
+      
+      if (token.type === "keyword" && ["push", "pop", "size", "get"].includes(token.value)) {
+          return parseArrayOperation();
+      }
+
       throw new Error(`Unexpected token: ${token.value} at line ${line}`);
   }
 
@@ -352,7 +360,7 @@ const parser = (tokens) => {
       console.log("Current token after init:", tokens[current]);
       
       // Expect semicolon
-      if (tokens[current].type !== "semicolon") {
+      if (tokens[current].type !== "punctuation" || tokens[current].value !== ";") {
           throw new Error("Expected ';' after for loop initialization");
       }
       current++; // Move past semicolon
@@ -363,7 +371,7 @@ const parser = (tokens) => {
       console.log("Current token after condition:", tokens[current]);
       
       // Expect semicolon
-      if (tokens[current].type !== "semicolon") {
+      if (tokens[current].type !== "punctuation" || tokens[current].value !== ";") {
           throw new Error("Expected ';' after for loop condition");
       }
       current++; // Move past semicolon
@@ -469,7 +477,7 @@ const parser = (tokens) => {
           const value = parseExpression();
           
           // Skip semicolon if present
-          if (current < tokens.length && tokens[current].type === "semicolon") {
+          if (current < tokens.length && tokens[current].type === "punctuation" && tokens[current].value === ";") {
               current++;
           }
           
@@ -533,7 +541,7 @@ const parser = (tokens) => {
       }
 
       // Skip semicolon if present
-      if (current < tokens.length && tokens[current].type === "semicolon") {
+      if (current < tokens.length && tokens[current].type === "punctuation" && tokens[current].value === ";") {
           current++;
       }
 
@@ -550,7 +558,7 @@ const parser = (tokens) => {
       const expression = parseExpression();
       
       // Skip semicolon if present
-      if (current < tokens.length && tokens[current].type === "semicolon") {
+      if (current < tokens.length && tokens[current].type === "punctuation" && tokens[current].value === ";") {
           current++;
       }
 
@@ -684,6 +692,76 @@ const parser = (tokens) => {
       };
   }
 
+  function parseArrayLiteral() {
+      current++; // Move past '['
+      
+      const elements = [];
+      
+      // Handle empty array
+      if (tokens[current].type === "bracket" && tokens[current].value === "]") {
+          current++; // Move past ']'
+          return {
+              type: "ArrayLiteral",
+              elements: elements
+          };
+      }
+      
+      // Parse first element
+      elements.push(parseExpression());
+      
+      // Parse remaining elements
+      while (current < tokens.length) {
+          // Check for closing bracket
+          if (tokens[current].type === "bracket" && tokens[current].value === "]") {
+              current++; // Move past ']'
+              return {
+                  type: "ArrayLiteral",
+                  elements: elements
+              };
+          }
+          
+          // Expect a comma
+          if (tokens[current].type !== "punctuation" || tokens[current].value !== ",") {
+              throw new Error("Expected comma between array elements");
+          }
+          current++; // Move past comma
+          
+          // Parse next element
+          elements.push(parseExpression());
+      }
+      
+      throw new Error("Expected closing bracket ']'");
+  }
+
+  function parseArrayOperation() {
+      const operation = tokens[current].value;
+      current++; // Move past operation keyword
+      
+      // Expect array name
+      if (tokens[current].type !== "identifier") {
+          throw new Error(`Expected array name after ${operation}`);
+      }
+      const arrayName = tokens[current].value;
+      current++; // Move past array name
+      
+      let value = null;
+      if (operation === "push" || operation === "get") {
+          value = parseExpression();
+      }
+      
+      // Skip semicolon if present
+      if (current < tokens.length && tokens[current].type === "punctuation" && tokens[current].value === ";") {
+          current++;
+      }
+      
+      return {
+          type: "ArrayOperation",
+          operation: operation,
+          arrayName: arrayName,
+          value: value
+      };
+  }
+
   function walk() {
       let token = tokens[current];
 
@@ -701,6 +779,11 @@ const parser = (tokens) => {
                   return parseWhileLoop();
               case "input":
                   return parseInput();
+              case "push":
+              case "pop":
+              case "size":
+              case "get":
+                  return parseArrayOperation();
               case "sqrt":
               case "pow":
               case "abs":
@@ -818,6 +901,19 @@ const codeGen = (node) => {
                   trace: () => console.trace()
               };
               
+              // Array helper functions
+              const __array = {
+                  push: (arr, value) => { arr.push(value); return arr; },
+                  pop: (arr) => arr.pop(),
+                  size: (arr) => arr.length,
+                  get: (arr, index) => {
+                      if (index < 0 || index >= arr.length) {
+                          throw new Error('Array index out of bounds');
+                      }
+                      return arr[index];
+                  }
+              };
+              
               ${statements.join('\n')}
               return __output;
           `;
@@ -825,45 +921,53 @@ const codeGen = (node) => {
       case "VariableDeclaration":
           let declaration = `let ${node.name} = `;
           
-          if (node.value.type === "BinaryExpression") {
-              declaration += `${codeGen(node.value)}`;
-          } else if (node.value.type === "InputExpression") {
-              const inputCode = codeGen(node.value);
-              switch (node.varType) {
-                  case "int":
-                      declaration += `parseInt(${inputCode})`;
-                      break;
-                  case "float":
-                      declaration += `parseFloat(${inputCode})`;
-                      break;
-                  case "string":
-                      declaration += inputCode;
-                      break;
-                  case "char":
-                      declaration += `${inputCode}.charAt(0)`;
-                      break;
-              }
-          } else if (node.value.type === "MathFunction") {
-              declaration += `__math.${node.value.name}(${node.value.arguments.map(arg => codeGen(arg)).join(", ")})`;
-          } else if (node.value.type === "StringFunction") {
-              declaration += `__string.${node.value.name}(${node.value.arguments.map(arg => codeGen(arg)).join(", ")})`;
-          } else {
-              if (node.value.type === "string") {
-                  declaration += `"${node.value.raw}"`;
+          if (node.varType === "array") {
+              if (node.value.type === "ArrayLiteral") {
+                  declaration += codeGen(node.value);
               } else {
+                  declaration += "[]"; // Empty array if no initial value
+              }
+          } else {
+              if (node.value.type === "BinaryExpression") {
+                  declaration += `${codeGen(node.value)}`;
+              } else if (node.value.type === "InputExpression") {
+                  const inputCode = codeGen(node.value);
                   switch (node.varType) {
                       case "int":
-                          declaration += `parseInt(${node.value.value})`;
+                          declaration += `parseInt(${inputCode})`;
                           break;
                       case "float":
-                          declaration += `parseFloat(${node.value.value})`;
+                          declaration += `parseFloat(${inputCode})`;
                           break;
                       case "string":
-                          declaration += `"${node.value.value.replace(/\\n/g, '\n')}"`;
+                          declaration += inputCode;
                           break;
                       case "char":
-                          declaration += `'${node.value.value}'`;
+                          declaration += `${inputCode}.charAt(0)`;
                           break;
+                  }
+              } else if (node.value.type === "MathFunction") {
+                  declaration += `__math.${node.value.name}(${node.value.arguments.map(arg => codeGen(arg)).join(", ")})`;
+              } else if (node.value.type === "StringFunction") {
+                  declaration += `__string.${node.value.name}(${node.value.arguments.map(arg => codeGen(arg)).join(", ")})`;
+              } else {
+                  if (node.value.type === "string") {
+                      declaration += `"${node.value.raw}"`;
+                  } else {
+                      switch (node.varType) {
+                          case "int":
+                              declaration += `parseInt(${node.value.value})`;
+                              break;
+                          case "float":
+                              declaration += `parseFloat(${node.value.value})`;
+                              break;
+                          case "string":
+                              declaration += `"${node.value.value.replace(/\\n/g, '\n')}"`;
+                              break;
+                          case "char":
+                              declaration += `'${node.value.value}'`;
+                              break;
+                      }
                   }
               }
           }
@@ -963,6 +1067,24 @@ const codeGen = (node) => {
       case "DebugFunction":
           const debugArgs = node.arguments.map(arg => codeGen(arg)).join(", ");
           return `__debug.${node.name}(${debugArgs})`;
+
+      case "ArrayLiteral":
+          const elements = node.elements.map(elem => codeGen(elem)).join(', ');
+          return `[${elements}]`;
+
+      case "ArrayOperation":
+          switch (node.operation) {
+              case "push":
+                  return `__array.push(${node.arrayName}, ${codeGen(node.value)});`;
+              case "pop":
+                  return `__array.pop(${node.arrayName});`;
+              case "size":
+                  return `__array.size(${node.arrayName})`;
+              case "get":
+                  return `__array.get(${node.arrayName}, ${codeGen(node.value)})`;
+              default:
+                  throw new Error(`Unknown array operation: ${node.operation}`);
+          }
 
       default:
           if (node.type === "identifier" || node.type === "number" || node.type === "float") {
